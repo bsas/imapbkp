@@ -1,0 +1,8 @@
+mail.imaps.host=imap.gmail.com
+mail.imaps.user=
+mail.imaps.password=
+mail.imaps.port=993
+mail.imaps.auth=true
+mail.debug=false
+mail.imap.ssl.enable=true
+mail.imap.starttls.enable=true
