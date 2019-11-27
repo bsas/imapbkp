@@ -108,18 +108,20 @@ public class Main {
       boolean wasRead = false;
       try (ByteArrayOutputStream data = new ByteArrayOutputStream()) {
          // Create message ID
-         final MessageDigest digest = MessageDigest.getInstance("SHA-256");
          final String[] messageIds = message.getHeader("Message-ID");
          String messageId = null;
          if (messageIds == null || messageIds.length == 0) {
             message.writeTo(data);
             wasRead = true;
+
+            final MessageDigest digest = MessageDigest.getInstance("SHA-256");
             messageId = new BigInteger(1, digest.digest(data.toByteArray())).toString(16);
          } else {
+            final MessageDigest digest = MessageDigest.getInstance("SHA-256");
             messageId = new BigInteger(1, digest.digest(String.join(",", messageIds).getBytes())).toString(16);
          }
 
-         final Path dataPath = Paths.get(outputFolder, "data", messageId.substring(0, 4));
+         final Path dataPath = Paths.get(outputFolder, "data", messageId.substring(0, 2), messageId.substring(2, 4), messageId.substring(4, 6));
          final Path messagePath = Paths.get(dataPath.toString(), messageId + ".eml.gz");
          messageFilename = messagePath.toString();
          final File messageFile = messagePath.toFile();
@@ -137,6 +139,12 @@ public class Main {
             try (OutputStream gzfile = new GZIPOutputStream(new FileOutputStream(messageFile))) {
                data.writeTo(gzfile);
             }
+
+            try (FileWriter writer = new FileWriter(Paths.get(dataPath.toString(), messageId + ".hash").toFile())) {
+               final MessageDigest digest = MessageDigest.getInstance("SHA-256");
+               writer.write(new BigInteger(1, digest.digest(data.toByteArray())).toString(16));
+            }
+
          }
       }
       return messageFilename;
