@@ -1,8 +1,15 @@
+mail.debug=false
+mail.mime.base64.ignoreerrors=true
 mail.imaps.host=imap.gmail.com
 mail.imaps.user=
 mail.imaps.password=
 mail.imaps.port=993
 mail.imaps.auth=true
-mail.debug=false
+mail.imaps.compress.enable=true
+mail.imaps.connectionpoolsize=10
+mail.imaps.partialfetch=false
 mail.imap.ssl.enable=true
 mail.imap.starttls.enable=true
+mail.imap.compress.enable=true
+mail.imap.connectionpoolsize=10
+mail.imap.partialfetch=false

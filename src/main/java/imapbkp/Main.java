@@ -14,11 +14,12 @@ import java.nio.file.Paths;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.HashSet;
+import java.util.Calendar;
 import java.util.Properties;
-import java.util.Set;
+import java.util.TimeZone;
 import java.util.zip.GZIPOutputStream;
 
+import javax.mail.FetchProfile;
 import javax.mail.Folder;
 import javax.mail.Message;
 import javax.mail.MessagingException;
@@ -31,10 +32,14 @@ import org.apache.commons.cli.DefaultParser;
 import org.apache.commons.cli.HelpFormatter;
 import org.apache.commons.cli.Option;
 import org.apache.commons.cli.Options;
+import org.apache.log4j.Logger;
 
 import com.sun.mail.util.MailSSLSocketFactory;
 
 public class Main {
+
+   final static Logger LOGGER = Logger.getLogger("imapbkp");
+   final static int FETCH_SIZE = 10;
 
    public static void main(String[] args) {
       // CLI options
@@ -57,42 +62,62 @@ public class Main {
             run(props, output);
          }
       } catch (Exception e) {
-         System.err.println(e);
+         LOGGER.error(e.getMessage(), e);
       }
 
       // TODO: exit error codes???
       System.exit(0);
    }
 
-   private static void openFolder(Folder folder, String outputFolder) {
+   private static void openFolder(final Folder folder, final String outputFolder) {
       try {
          for (Folder children : folder.list()) {
             openFolder(children, outputFolder);
          }
 
          if ((folder.getType() & Folder.HOLDS_MESSAGES) != 0) {
-            System.out.println("Reading label: " + folder.getFullName());
-            folder.open(Folder.READ_ONLY);
+            final String folderName = folder.getFullName().trim().replaceAll("[^A-Za-z0-9]", "");
 
-            final Set<String> list = new HashSet<String>();
-            for (Message message : folder.getMessages()) {
-               final String messageFile = saveMessage(message, outputFolder);
-               list.add(messageFile);
-               System.out.println("Message backup file: " + messageFile);
-            }
+            final int total = folder.getMessageCount();
+
+            LOGGER.info("Reading label: " + folderName + " (" + total + ")");
+            folder.open(Folder.READ_ONLY);
 
             final Path labelsPath = Paths.get(outputFolder, "labels");
             labelsPath.toFile().mkdirs();
-            final Path labelPath = Paths.get(labelsPath.toString(), folder.getFullName() + ".txt");
+            final Path labelPath = Paths.get(labelsPath.toString(), folderName + ".txt");
+            LOGGER.info("Label backup file: " + labelPath.toString());
+
+            // Retrieve messages
             try (FileWriter writer = new FileWriter(labelPath.toFile())) {
-               for (String str : list) {
-                  writer.write(str + System.lineSeparator());
+               writer.write(folder.getFullName() + ":" + System.lineSeparator());
+
+               for (int i = 1; i <= total; i += FETCH_SIZE) {
+                  // Retrieve base info for messages
+                  final Message[] messages = folder.getMessages(i, i + FETCH_SIZE);
+                  final FetchProfile fp = new FetchProfile();
+                  fp.add(FetchProfile.Item.ENVELOPE);
+                  fp.add("Message-ID");
+                  folder.fetch(messages, fp);
+
+                  // Verify each message
+                  for (int count = i; count < (i + FETCH_SIZE) && count <= total; count++) {
+                     final Message message = messages[count - i];
+
+                     final String messageFile = saveMessage(message, outputFolder, total, count);
+                     LOGGER.debug("Message backup file (" + count + "/" + total + "): " + messageFile);
+
+                     writer.write(messageFile + System.lineSeparator());
+                     if (count % FETCH_SIZE == 0) {
+                        LOGGER.info("Messages backup (" + count + "/" + total + ")");
+                        writer.flush();
+                     }
+                  }
                }
-               System.out.println("Label backup file: " + labelPath.toString());
             }
          }
       } catch (Exception e) {
-         System.err.println("Error processing folder '" + folder.getFullName() + "': " + e.getMessage());
+         LOGGER.error("Error processing folder '" + folder.getFullName(), e);
       } finally {
          if (folder.isOpen()) {
             try {
@@ -103,39 +128,40 @@ public class Main {
       }
    }
 
-   private static String saveMessage(Message message, String outputFolder) throws IOException, MessagingException, NoSuchAlgorithmException {
+   private static String saveMessage(final Message message, final String outputFolder, final int total, final int count) throws IOException, MessagingException, NoSuchAlgorithmException {
       String messageFilename = null;
-      boolean wasRead = false;
       try (ByteArrayOutputStream data = new ByteArrayOutputStream()) {
+         // Get message date fields
+         final Calendar sent = Calendar.getInstance(TimeZone.getTimeZone("GMT"));
+         sent.setTime(message.getReceivedDate());
+         final String day = "" + sent.get(Calendar.DAY_OF_MONTH);
+         final String month = "" + (sent.get(Calendar.MONTH) + 1);
+         final String year = "" + (sent.get(Calendar.YEAR));
+
          // Create message ID
          final String[] messageIds = message.getHeader("Message-ID");
          String messageId = null;
          if (messageIds == null || messageIds.length == 0) {
-            message.writeTo(data);
-            wasRead = true;
-
             final MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            messageId = new BigInteger(1, digest.digest(data.toByteArray())).toString(16);
+            messageId = new BigInteger(1, digest.digest((message.getSubject() + " : " + sent.getTimeInMillis()).getBytes())).toString(16);
          } else {
             final MessageDigest digest = MessageDigest.getInstance("SHA-256");
             messageId = new BigInteger(1, digest.digest(String.join(",", messageIds).getBytes())).toString(16);
          }
 
-         final Path dataPath = Paths.get(outputFolder, "data", messageId.substring(0, 2), messageId.substring(2, 4), messageId.substring(4, 6));
+         // Build saving paths
+         final Path dataPath = Paths.get(outputFolder, "data", year, month, day);
          final Path messagePath = Paths.get(dataPath.toString(), messageId + ".eml.gz");
          messageFilename = messagePath.toString();
          final File messageFile = messagePath.toFile();
 
          if (messageFile.exists()) {
             // TODO: Verify SHA-256???
-            System.out.println("Message already downloaded: " + messageFilename);
+            LOGGER.debug("Message already downloaded (" + count + "/" + total + "): " + messageFilename);
          } else {
             dataPath.toFile().mkdirs();
-            System.out.println("Downloading message: " + messageId + "...");
-            if (!wasRead) {
-               message.writeTo(data);
-               wasRead = true;
-            }
+            LOGGER.debug("Downloading message (" + count + "/" + total + "): " + messageId + "...");
+            message.writeTo(data);
             try (OutputStream gzfile = new GZIPOutputStream(new FileOutputStream(messageFile))) {
                data.writeTo(gzfile);
             }
@@ -147,6 +173,7 @@ public class Main {
 
          }
       }
+
       return messageFilename;
    }
 
@@ -177,11 +204,11 @@ public class Main {
          final Session session = javax.mail.Session.getInstance(props);
          store = session.getStore(isSSL ? "imaps" : "imap");
          store.connect(host, port, user, password);
-         System.out.println("Connection successful: " + store.getURLName());
+         LOGGER.info("Connection successful: " + store.getURLName());
          openFolder(store.getDefaultFolder(), outputFolder);
       } finally {
          store.close();
-         System.out.println("Disconnected!");
+         LOGGER.info("Disconnected!");
       }
    }
 
