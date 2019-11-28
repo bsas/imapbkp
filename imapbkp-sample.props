@@ -13,3 +13,4 @@ mail.imap.starttls.enable=true
 mail.imap.compress.enable=true
 mail.imap.connectionpoolsize=10
 mail.imap.partialfetch=false
+imapbkp.fetchsize=10

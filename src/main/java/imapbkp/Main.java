@@ -32,14 +32,15 @@ import org.apache.commons.cli.DefaultParser;
 import org.apache.commons.cli.HelpFormatter;
 import org.apache.commons.cli.Option;
 import org.apache.commons.cli.Options;
+import org.apache.log4j.FileAppender;
 import org.apache.log4j.Logger;
 
 import com.sun.mail.util.MailSSLSocketFactory;
 
 public class Main {
 
-   final static Logger LOGGER = Logger.getLogger("imapbkp");
-   final static int FETCH_SIZE = 10;
+   private static Logger LOGGER = Logger.getLogger("imapbkp");
+   private static int FETCH_SIZE = 10;
 
    public static void main(String[] args) {
       // CLI options
@@ -47,6 +48,7 @@ public class Main {
       options.addOption(new Option("h", "help", false, "Help."));
       options.addOption(new Option("p", "props", true, "Properties file."));
       options.addOption(new Option("o", "output", true, "Output folder."));
+      options.addOption(new Option("l", "log", true, "Log file."));
 
       // Create the CLI parser
       final CommandLineParser parser = new DefaultParser();
@@ -59,6 +61,10 @@ public class Main {
          } else {
             final String props = line.hasOption("props") ? line.getOptionValue("props") : "imapbkp.props";
             String output = line.hasOption("output") ? line.getOptionValue("output") : System.getProperty("user.dir");
+            if (line.hasOption("log")) {
+               LOGGER.addAppender(new FileAppender(new org.apache.log4j.PatternLayout("%d{yyyy-MM-dd HH:mm:ss} %-5p %c{1}:%L - %m%n"), line.getOptionValue("log"), false));
+            }
+
             run(props, output);
          }
       } catch (Exception e) {
@@ -183,6 +189,7 @@ public class Main {
       try (InputStream in = new FileInputStream(new File(propsFile))) {
          props.load(in);
       }
+      FETCH_SIZE = Integer.parseInt(props.getProperty("imapbkp.fetchsize", "" + FETCH_SIZE));
 
       // Setup SSL context
       boolean isSSL = "true".equals(props.get("mail.imap.ssl.enable")) || "true".equals(props.get("mail.imap.starttls.enable"));
