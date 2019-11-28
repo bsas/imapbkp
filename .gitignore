@@ -8,10 +8,10 @@
 *.ctxt
 
 # Eclipse Core      
-.project
-
-# JDT-specific (Eclipse Java Development Tools)     
+.project     
 .classpath
+.settings
+*.springBeans
 
 # Mobile Tools for Java (J2ME)
 .mtj.tmp/
