@@ -14,7 +14,10 @@ import java.nio.file.Paths;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.text.SimpleDateFormat;
+import java.util.Arrays;
 import java.util.Calendar;
+import java.util.Date;
 import java.util.Properties;
 import java.util.TimeZone;
 import java.util.zip.GZIPOutputStream;
@@ -25,6 +28,9 @@ import javax.mail.Message;
 import javax.mail.MessagingException;
 import javax.mail.Session;
 import javax.mail.Store;
+import javax.mail.search.ComparisonTerm;
+import javax.mail.search.ReceivedDateTerm;
+import javax.mail.search.SearchTerm;
 
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.CommandLineParser;
@@ -49,6 +55,8 @@ public class Main {
       options.addOption(new Option("p", "props", true, "Properties file."));
       options.addOption(new Option("o", "output", true, "Output folder."));
       options.addOption(new Option("l", "log", true, "Log file."));
+      options.addOption(new Option("f", "force", false, "Force download all messages."));
+      options.addOption(new Option("d", "date", true, "Force messages from this date."));
 
       // Create the CLI parser
       final CommandLineParser parser = new DefaultParser();
@@ -60,12 +68,22 @@ public class Main {
             formatter.printHelp("imapbkp", options, true);
          } else {
             final String props = line.hasOption("props") ? line.getOptionValue("props") : "imapbkp.props";
-            String output = line.hasOption("output") ? line.getOptionValue("output") : System.getProperty("user.dir");
+            final String output = line.hasOption("output") ? line.getOptionValue("output") : System.getProperty("user.dir");
+
+            // Find last date
+            Date fromDate = null;
+            if (!line.hasOption("force")) {
+               final SimpleDateFormat formatter = new SimpleDateFormat("yyyy-MM-dd");
+               fromDate = line.hasOption("date") ? formatter.parse(line.getOptionValue("date")) : findLastSyncDate(output);
+            }
+            LOGGER.info(fromDate == null ? "Full sync... (that can take a lot of time)" : "Sync all messages since " + fromDate);
+
+            // Configure log file
             if (line.hasOption("log")) {
                LOGGER.addAppender(new FileAppender(new org.apache.log4j.PatternLayout("%d{yyyy-MM-dd HH:mm:ss} %-5p %c{1}:%L - %m%n"), line.getOptionValue("log"), false));
             }
 
-            run(props, output);
+            run(props, output, fromDate);
          }
       } catch (Exception e) {
          LOGGER.error(e.getMessage(), e);
@@ -75,19 +93,26 @@ public class Main {
       System.exit(0);
    }
 
-   private static void openFolder(final Folder folder, final String outputFolder) {
+   private static void openFolder(final Folder folder, final String outputFolder, final Date fromDate) {
       try {
          for (Folder children : folder.list()) {
-            openFolder(children, outputFolder);
+            openFolder(children, outputFolder, fromDate);
          }
 
          if ((folder.getType() & Folder.HOLDS_MESSAGES) != 0) {
             final String folderName = folder.getFullName().trim().replaceAll("[^A-Za-z0-9]", "");
-
-            final int total = folder.getMessageCount();
-
-            LOGGER.info("Reading label: " + folderName + " (" + total + ")");
             folder.open(Folder.READ_ONLY);
+
+            Message[] messages = null;
+            int total = 0;
+            if (fromDate == null) {
+               total = folder.getMessageCount();
+            } else {
+               final SearchTerm newerThan = new ReceivedDateTerm(ComparisonTerm.GT, fromDate);
+               messages = folder.search(newerThan);
+               total = messages.length;
+            }
+            LOGGER.info("Reading label: " + folderName + " (" + total + ")");
 
             final Path labelsPath = Paths.get(outputFolder, "labels");
             labelsPath.toFile().mkdirs();
@@ -99,12 +124,14 @@ public class Main {
                writer.write(folder.getFullName() + ":" + System.lineSeparator());
 
                for (int i = 1; i <= total; i += FETCH_SIZE) {
-                  // Retrieve base info for messages
-                  final Message[] messages = folder.getMessages(i, i + FETCH_SIZE);
-                  final FetchProfile fp = new FetchProfile();
-                  fp.add(FetchProfile.Item.ENVELOPE);
-                  fp.add("Message-ID");
-                  folder.fetch(messages, fp);
+                  if (fromDate == null) {
+                     // Retrieve base info for messages
+                     messages = folder.getMessages(i, i + FETCH_SIZE);
+                     final FetchProfile fp = new FetchProfile();
+                     fp.add(FetchProfile.Item.ENVELOPE);
+                     fp.add("Message-ID");
+                     folder.fetch(messages, fp);
+                  }
 
                   // Verify each message
                   for (int count = i; count < (i + FETCH_SIZE) && count <= total; count++) {
@@ -183,7 +210,30 @@ public class Main {
       return messageFilename;
    }
 
-   public static void run(String propsFile, String outputFolder) throws GeneralSecurityException, IOException, MessagingException {
+   private static Date findLastSyncDate(final String outputFolder) throws IOException {
+      final File dataPath = Paths.get(outputFolder, "data").toFile();
+      final int year = Arrays.asList(dataPath.list()).stream().mapToInt(v -> Integer.parseInt(v)).max().orElse(-1);
+      final int month = year == -1 ? -1 : Arrays.asList(Paths.get(dataPath.getAbsolutePath(), "" + year).toFile().list()).stream().mapToInt(v -> Integer.parseInt(v)).max().orElse(-1);
+      final int day = month == -1 ? -1 : Arrays.asList(Paths.get(dataPath.getAbsolutePath(), "" + year, "" + month).toFile().list()).stream().mapToInt(v -> Integer.parseInt(v)).max().orElse(-1);
+
+      Date fromDate = null;
+      if (year != -1 && month != -1 && day != -1) {
+         final Calendar last = Calendar.getInstance(TimeZone.getTimeZone("GMT"));
+         last.set(Calendar.YEAR, year);
+         last.set(Calendar.MONTH, month - 1);
+         last.set(Calendar.DAY_OF_MONTH, day);
+         last.set(Calendar.HOUR, 0);
+         last.set(Calendar.MINUTE, 0);
+         last.set(Calendar.SECOND, 0);
+         last.set(Calendar.MILLISECOND, 0);
+         last.add(Calendar.DAY_OF_MONTH, -1);
+         fromDate = last.getTime();
+      }
+
+      return fromDate;
+   }
+
+   public static void run(final String propsFile, final String outputFolder, final Date fromDate) throws GeneralSecurityException, IOException, MessagingException {
       // Read properties
       final Properties props = new Properties();
       try (InputStream in = new FileInputStream(new File(propsFile))) {
@@ -212,7 +262,7 @@ public class Main {
          store = session.getStore(isSSL ? "imaps" : "imap");
          store.connect(host, port, user, password);
          LOGGER.info("Connection successful: " + store.getURLName());
-         openFolder(store.getDefaultFolder(), outputFolder);
+         openFolder(store.getDefaultFolder(), outputFolder, fromDate);
       } finally {
          store.close();
          LOGGER.info("Disconnected!");
