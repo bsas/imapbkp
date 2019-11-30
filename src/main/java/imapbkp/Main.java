@@ -9,25 +9,32 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.math.BigInteger;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.text.SimpleDateFormat;
-import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.TimeZone;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import java.util.zip.GZIPOutputStream;
 
-import javax.mail.FetchProfile;
 import javax.mail.Folder;
 import javax.mail.Message;
 import javax.mail.MessagingException;
 import javax.mail.Session;
 import javax.mail.Store;
+import javax.mail.search.AndTerm;
 import javax.mail.search.ComparisonTerm;
 import javax.mail.search.ReceivedDateTerm;
 import javax.mail.search.SearchTerm;
@@ -47,6 +54,7 @@ public class Main {
 
    private static Logger LOGGER = Logger.getLogger("imapbkp");
    private static int FETCH_SIZE = 10;
+   private static final String SYNCFILE = "lastupdate.txt";
 
    public static void main(String[] args) {
       // CLI options
@@ -56,7 +64,8 @@ public class Main {
       options.addOption(new Option("o", "output", true, "Output folder."));
       options.addOption(new Option("l", "log", true, "Log file."));
       options.addOption(new Option("f", "force", false, "Force download all messages."));
-      options.addOption(new Option("d", "date", true, "Force messages from this date."));
+      options.addOption(new Option("s", "start", true, "Start date for all downloaded messages."));
+      options.addOption(new Option("e", "end", true, "End date for all downloaded messages."));
 
       // Create the CLI parser
       final CommandLineParser parser = new DefaultParser();
@@ -71,19 +80,29 @@ public class Main {
             final String output = line.hasOption("output") ? line.getOptionValue("output") : System.getProperty("user.dir");
 
             // Find last date
+            final boolean force = line.hasOption("force");
             Date fromDate = null;
-            if (!line.hasOption("force")) {
+            Date toDate = null;
+            if (!force) {
                final SimpleDateFormat formatter = new SimpleDateFormat("yyyy-MM-dd");
-               fromDate = line.hasOption("date") ? formatter.parse(line.getOptionValue("date")) : findLastSyncDate(output);
+               fromDate = line.hasOption("start") ? formatter.parse(line.getOptionValue("start")) : null;
+               toDate = line.hasOption("end") ? formatter.parse(line.getOptionValue("end")) : null;
+               if (fromDate != null) {
+                  LOGGER.info("Sync all messages newer than " + fromDate);
+               }
+               if (toDate != null) {
+                  LOGGER.info("Sync all messages older than " + toDate);
+               }
+            } else {
+               LOGGER.info("Full sync... (that can take a lot of time)");
             }
-            LOGGER.info(fromDate == null ? "Full sync... (that can take a lot of time)" : "Sync all messages since " + fromDate);
 
             // Configure log file
             if (line.hasOption("log")) {
                LOGGER.addAppender(new FileAppender(new org.apache.log4j.PatternLayout("%d{yyyy-MM-dd HH:mm:ss} %-5p %c{1}:%L - %m%n"), line.getOptionValue("log"), false));
             }
 
-            run(props, output, fromDate);
+            run(props, output, force, fromDate, toDate);
          }
       } catch (Exception e) {
          LOGGER.error(e.getMessage(), e);
@@ -93,23 +112,53 @@ public class Main {
       System.exit(0);
    }
 
-   private static void openFolder(final Folder folder, final String outputFolder, final Date fromDate) {
+   private static Map<String, Long> openSyncData(final String outputFolder) throws IOException {
+      Map<String, Long> syncData = new HashMap<String, Long>();
+      try (final Stream<String> lines = Files.lines(Paths.get(outputFolder, SYNCFILE))) {
+         syncData = lines.map(line -> line.split(",")).collect(Collectors.toMap(line -> line[0], line -> Long.parseLong(line[1])));
+         LOGGER.info("Sync data loaded: " + syncData);
+      } catch (Exception e) {
+      }
+      return syncData;
+   }
+
+   private static void saveSyncData(final String outputFolder, final Map<String, Long> syncData) throws IOException {
+      try (FileWriter writer = new FileWriter(Paths.get(outputFolder, SYNCFILE).toFile())) {
+         LOGGER.info("Sync data saved: " + syncData);
+         final List<String> list = syncData.entrySet().stream().map(e -> e.getKey() + "," + e.getValue()).collect(Collectors.toList());
+         writer.write(String.join(System.lineSeparator(), list));
+      } catch (Exception e) {
+      }
+   }
+
+   private static void openFolder(final Folder folder, final String outputFolder, final boolean force, final Date fromDate, final Date toDate, final Map<String, Long> syncData) {
       try {
          for (Folder children : folder.list()) {
-            openFolder(children, outputFolder, fromDate);
+            openFolder(children, outputFolder, force, fromDate, toDate, syncData);
          }
 
          if ((folder.getType() & Folder.HOLDS_MESSAGES) != 0) {
             final String folderName = folder.getFullName().trim().replaceAll("[^A-Za-z0-9]", "");
             folder.open(Folder.READ_ONLY);
 
+            // Retrieve sync date
+            final Long lastSync = syncData.get(folderName);
+            final Date syncDate = lastSync == null ? new Date(0) : new Date(lastSync - 1);
+            if (lastSync == null) {
+               syncData.put(folderName, syncDate.getTime());
+            }
+
+            // Retrieve messages
             Message[] messages = null;
             int total = 0;
-            if (fromDate == null) {
+            if (force) {
+               messages = folder.getMessages();
                total = folder.getMessageCount();
             } else {
-               final SearchTerm newerThan = new ReceivedDateTerm(ComparisonTerm.GT, fromDate);
-               messages = folder.search(newerThan);
+               final SearchTerm newerThan = fromDate == null ? new ReceivedDateTerm(ComparisonTerm.GT, syncDate) : new ReceivedDateTerm(ComparisonTerm.GT, fromDate);
+               final SearchTerm olderThan = toDate == null ? null : new ReceivedDateTerm(ComparisonTerm.LT, toDate);
+               final SearchTerm term = olderThan == null ? newerThan : new AndTerm(newerThan, olderThan);
+               messages = folder.search(term);
                total = messages.length;
             }
             LOGGER.info("Reading label: " + folderName + " (" + total + ")");
@@ -119,38 +168,41 @@ public class Main {
             final Path labelPath = Paths.get(labelsPath.toString(), folderName + ".txt");
             LOGGER.info("Label backup file: " + labelPath.toString());
 
+            // Read old file (if it exists)
+            final Set<String> list = new HashSet<String>();
+            try (final Stream<String> lines = Files.lines(labelPath)) {
+               list.addAll(lines.collect(Collectors.toList()));
+               list.remove("");
+            } catch (Exception e) {
+            }
+
             // Retrieve messages
-            try (FileWriter writer = new FileWriter(labelPath.toFile())) {
-               writer.write(folder.getFullName() + ":" + System.lineSeparator());
+            try {
+               for (int count = 1; count <= messages.length; count++) {
+                  final Message message = messages[count - 1];
 
-               for (int i = 1; i <= total; i += FETCH_SIZE) {
-                  if (fromDate == null) {
-                     // Retrieve base info for messages
-                     messages = folder.getMessages(i, i + FETCH_SIZE);
-                     final FetchProfile fp = new FetchProfile();
-                     fp.add(FetchProfile.Item.ENVELOPE);
-                     fp.add("Message-ID");
-                     folder.fetch(messages, fp);
-                  }
+                  final String messageFile = saveMessage(message, outputFolder, total, count);
+                  LOGGER.debug(folderName + ": Message backup file (" + count + "/" + total + "): " + messageFile);
 
-                  // Verify each message
-                  for (int count = i; count < (i + FETCH_SIZE) && count <= total; count++) {
-                     final Message message = messages[count - i];
-
-                     final String messageFile = saveMessage(message, outputFolder, total, count);
-                     LOGGER.debug("Message backup file (" + count + "/" + total + "): " + messageFile);
-
-                     writer.write(messageFile + System.lineSeparator());
-                     if (count % FETCH_SIZE == 0) {
-                        LOGGER.info("Messages backup (" + count + "/" + total + ")");
-                        writer.flush();
-                     }
+                  list.add(messageFile);
+                  syncData.put(folderName, Math.max(syncData.get(folderName), message.getReceivedDate().getTime()));
+                  if (count % FETCH_SIZE == 0) {
+                     LOGGER.info(folderName + ": Messages downloaded (" + count + "/" + total + ")");
                   }
                }
+            } catch (IndexOutOfBoundsException e) {
+               LOGGER.warn("Cannot retrieve message", e);
+            }
+
+            // Save label file
+            try (FileWriter writer = new FileWriter(labelPath.toFile())) {
+               LOGGER.info(folderName + ": Messages done (" + list.size() + "/" + total + ")");
+               writer.write(String.join(System.lineSeparator(), list));
+            } catch (Exception e) {
             }
          }
       } catch (Exception e) {
-         LOGGER.error("Error processing folder '" + folder.getFullName(), e);
+         LOGGER.error("Error processing label '" + folder.getFullName(), e);
       } finally {
          if (folder.isOpen()) {
             try {
@@ -210,30 +262,7 @@ public class Main {
       return messageFilename;
    }
 
-   private static Date findLastSyncDate(final String outputFolder) throws IOException {
-      final File dataPath = Paths.get(outputFolder, "data").toFile();
-      final int year = Arrays.asList(dataPath.list()).stream().mapToInt(v -> Integer.parseInt(v)).max().orElse(-1);
-      final int month = year == -1 ? -1 : Arrays.asList(Paths.get(dataPath.getAbsolutePath(), "" + year).toFile().list()).stream().mapToInt(v -> Integer.parseInt(v)).max().orElse(-1);
-      final int day = month == -1 ? -1 : Arrays.asList(Paths.get(dataPath.getAbsolutePath(), "" + year, "" + month).toFile().list()).stream().mapToInt(v -> Integer.parseInt(v)).max().orElse(-1);
-
-      Date fromDate = null;
-      if (year != -1 && month != -1 && day != -1) {
-         final Calendar last = Calendar.getInstance(TimeZone.getTimeZone("GMT"));
-         last.set(Calendar.YEAR, year);
-         last.set(Calendar.MONTH, month - 1);
-         last.set(Calendar.DAY_OF_MONTH, day);
-         last.set(Calendar.HOUR, 0);
-         last.set(Calendar.MINUTE, 0);
-         last.set(Calendar.SECOND, 0);
-         last.set(Calendar.MILLISECOND, 0);
-         last.add(Calendar.DAY_OF_MONTH, -1);
-         fromDate = last.getTime();
-      }
-
-      return fromDate;
-   }
-
-   public static void run(final String propsFile, final String outputFolder, final Date fromDate) throws GeneralSecurityException, IOException, MessagingException {
+   public static void run(final String propsFile, final String outputFolder, final boolean force, final Date fromDate, final Date toDate) throws GeneralSecurityException, IOException, MessagingException {
       // Read properties
       final Properties props = new Properties();
       try (InputStream in = new FileInputStream(new File(propsFile))) {
@@ -262,7 +291,15 @@ public class Main {
          store = session.getStore(isSSL ? "imaps" : "imap");
          store.connect(host, port, user, password);
          LOGGER.info("Connection successful: " + store.getURLName());
-         openFolder(store.getDefaultFolder(), outputFolder, fromDate);
+
+         // Read sync data
+         final Map<String, Long> syncData = openSyncData(outputFolder);
+
+         // Open root folder and all sub-folders
+         openFolder(store.getDefaultFolder(), outputFolder, force, fromDate, toDate, syncData);
+
+         // Save sync data
+         saveSyncData(outputFolder, syncData);
       } finally {
          store.close();
          LOGGER.info("Disconnected!");
