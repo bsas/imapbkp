@@ -19,14 +19,14 @@
 		<exec-maven-plugin.version>1.6.0</exec-maven-plugin.version>
 		<log4j.version>1.2.17</log4j.version>
 		<org.slf4j.version>1.7.29</org.slf4j.version>
-		<javax.mail.version>1.4.7</javax.mail.version>
+		<javax.mail.version>1.6.2</javax.mail.version>
 		<commons-cli.version>1.4</commons-cli.version>
 	</properties>
 
 	<dependencies>
 		<dependency>
-			<groupId>javax.mail</groupId>
-			<artifactId>mail</artifactId>
+			<groupId>com.sun.mail</groupId>
+			<artifactId>javax.mail</artifactId>
 			<version>${javax.mail.version}</version>
 		</dependency>
 		<dependency>
